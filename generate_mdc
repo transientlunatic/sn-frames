@@ -1,0 +1,87 @@
+#!/usr/bin/env python
+import sys
+import math
+import argparse
+
+import lal, lalsimulation, lalframe, lalburst
+from pylal import Fr
+
+argp = argparse.ArgumentParser()
+argp.add_argument("-s", "--gps-start-time", type=int, help="Start time of the injection frame. Default is to begin with the first injection.")
+argp.add_argument("-e", "--gps-end-time", type=int, help="End time of the injection frame. Default is to end with the last injection.")
+argp.add_argument("-S", "--sim-xml-table", help="Name of the XML file to draw the sim_burst table from. Required.")
+argp.add_argument("-c", "--channel-name", action="append", help="Name of channel to inject into. Implicitly gives set of instruments. E.g. --channel-name 'H1=INJ-STRAIN'")
+argp.add_argument("-v", "--verbose", action="store_true", help="Be verbose.")
+args = argp.parse_args()
+
+if args.sim_xml_table is None:
+    exit("--sim-xml-table is required")
+
+if args.channel_name is None:
+    exit("At least one --channel-name is required")
+channels = dict([c.split("=") for c in args.channel_name])
+
+start_time, end_time = args.gps_start_time, args.gps_end_time
+
+# Get the injection MML
+if args.verbose:
+    print "Reading injection from file"
+sim_burst = lalburst.SimBurstTableFromLIGOLw(args.sim_xml_table, start_time, end_time)
+
+#
+# Define start and end times if not done already
+#
+if start_time is None:
+    tmp = sim_burst
+    start_time = int(tmp.time_geocent_gps)
+    while tmp.next is not None:
+        start_time = min(start_time, tmp.time_geocent_gps)
+
+if end_time is None:
+    tmp = sim_burst
+    end_time = int(tmp.time_geocent_gps)
+    while tmp.next is not None:
+        end_time = min(end_time, tmp.time_geocent_gps)
+
+epoch = lal.LIGOTimeGPS(start_time)
+
+# This is our output frame
+data = []
+
+# Do the injections
+if args.verbose:
+    print "Generating injections from file"
+
+for ifo, cname in channels.iteritems():
+    # Use this time series to inject into
+    nsamp = (end_time-start_time)*16384
+    h_resp = lal.CreateREAL8TimeSeries("inj time series", epoch, 0, 1.0/16384, lal.StrainUnit, nsamp)
+
+    if args.verbose:
+        print "Generating injection response for %s" % ifo
+
+    while sim_burst is not None:
+        print sim_burst.waveform
+        hp, hx = lalburst.GenerateSimBurst(sim_burst, 1.0/16384);
+
+        # Apply detector response
+        det = lalsimulation.DetectorPrefixToLALDetector(ifo)
+        h_tot = lalsimulation.SimDetectorStrainREAL8TimeSeries(hp, hx,
+                    sim_burst.ra, sim_burst.dec, sim_burst.psi, det)
+        lalsimulation.SimAddInjectionREAL8TimeSeries(h_resp, h_tot, None)
+
+        sim_burst = sim_burst.next
+
+    # Write data to frame
+    data.append({"name": "%s:%s" % (ifo, cname),
+                 "data": h_resp.data.data,
+                 "start": float(epoch),
+                 "dx": h_resp.deltaT,
+                 "kind": "SIM"})
+
+if args.verbose:
+    print "Writing to file"
+duration = math.ceil(end_time) - math.floor(start_time)
+inst = "".join(set([c[:2] for c in channels]))
+output_fname = "%s-%s-%d-%d.gwf" % (inst, "BURST_INJECTIONS", start_time, duration)
+Fr.frputvect(output_fname, data)
